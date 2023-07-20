@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #define STATSD_DEBUG false  // STOPSHIP if true
+#include "Log.h"
 
 #include "MultiConditionTrigger.h"
 
@@ -33,8 +34,7 @@ MultiConditionTrigger::MultiConditionTrigger(const set<string>& conditionNames,
       mTrigger(std::move(trigger)),
       mCompleted(mRemainingConditionNames.empty()) {
     if (mCompleted) {
-        std::thread executorThread([this] { mTrigger(); });
-        executorThread.detach();
+        startExecutorThread();
     }
 }
 
@@ -50,10 +50,21 @@ void MultiConditionTrigger::markComplete(const string& conditionName) {
         doTrigger = mCompleted;
     }
     if (doTrigger) {
-        std::thread executorThread([this] { mTrigger(); });
-        executorThread.detach();
+        startExecutorThread();
     }
 }
+
+void MultiConditionTrigger::startExecutorThread() {
+    mExecutorThread = std::make_unique<std::thread>([this] { mTrigger(); });
+}
+
+MultiConditionTrigger::~MultiConditionTrigger() {
+    if (mExecutorThread != nullptr && mExecutorThread->joinable()) {
+        VLOG("MultiConditionTrigger waiting on execution thread termination");
+        mExecutorThread->join();
+    }
+}
+
 }  // namespace statsd
 }  // namespace os
 }  // namespace android

@@ -234,6 +234,7 @@ StatsService::StatsService(const sp<UidMap>& uidMap, shared_ptr<LogEventQueue> q
 }
 
 StatsService::~StatsService() {
+    onStatsdInitCompletedHandlerTermination();
     if (mEventQueue != nullptr) {
         stopReadingLogs();
         mLogsReaderThread->join();
@@ -1062,6 +1063,7 @@ Status StatsService::systemRunning() {
 Status StatsService::informDeviceShutdown() {
     ENFORCE_UID(AID_SYSTEM);
     VLOG("StatsService::informDeviceShutdown");
+    onStatsdInitCompletedHandlerTermination();
     int64_t elapsedRealtimeNs = getElapsedRealtimeNs();
     int64_t wallClockNs = getWallClockNs();
     mProcessor->WriteDataToDisk(DEVICE_SHUTDOWN, FAST, elapsedRealtimeNs, wallClockNs);
@@ -1115,7 +1117,14 @@ void StatsService::onStatsdInitCompleted() {
         // This function is called from a dedicated thread without holding locks, so sleeping is ok.
         // See MultiConditionTrigger::markComplete() executorThread for details
         // For more details see http://b/277958338
-        std::this_thread::sleep_for(std::chrono::seconds(mInitEventDelaySecs));
+
+        std::unique_lock<std::mutex> lk(mStatsdInitCompletedHandlerTerminationFlagMutex);
+        if (mStatsdInitCompletedHandlerTerminationFlag.wait_for(
+                    lk, std::chrono::seconds(mInitEventDelaySecs),
+                    [this] { return mStatsdInitCompletedHandlerTerminationRequested; })) {
+            VLOG("StatsService::onStatsdInitCompleted() Early termination is requested");
+            return;
+        }
     }
 
     mProcessor->onStatsdInitCompleted(getElapsedRealtimeNs());
@@ -1132,6 +1141,7 @@ void StatsService::Startup() {
 
 void StatsService::Terminate() {
     ALOGI("StatsService::Terminating");
+    onStatsdInitCompletedHandlerTermination();
     if (mProcessor != nullptr) {
         int64_t elapsedRealtimeNs = getElapsedRealtimeNs();
         int64_t wallClockNs = getWallClockNs();
@@ -1140,6 +1150,14 @@ void StatsService::Terminate() {
         mProcessor->SaveActiveConfigsToDisk(elapsedRealtimeNs);
         mProcessor->SaveMetadataToDisk(wallClockNs, elapsedRealtimeNs);
     }
+}
+
+void StatsService::onStatsdInitCompletedHandlerTermination() {
+    {
+        std::unique_lock<std::mutex> lk(mStatsdInitCompletedHandlerTerminationFlagMutex);
+        mStatsdInitCompletedHandlerTerminationRequested = true;
+    }
+    mStatsdInitCompletedHandlerTerminationFlag.notify_all();
 }
 
 // Test only interface!!!
@@ -1400,6 +1418,7 @@ void StatsService::statsCompanionServiceDied(void* cookie) {
 void StatsService::statsCompanionServiceDiedImpl() {
     ALOGW("statscompanion service died");
     StatsdStats::getInstance().noteSystemServerRestart(getWallClockSec());
+    onStatsdInitCompletedHandlerTermination();
     if (mProcessor != nullptr) {
         ALOGW("Reset statsd upon system server restarts.");
         int64_t systemServerRestartNs = getElapsedRealtimeNs();
