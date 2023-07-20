@@ -19,6 +19,7 @@
 
 #include <mutex>
 #include <set>
+#include <thread>
 
 namespace android {
 namespace os {
@@ -27,8 +28,8 @@ namespace statsd {
 /**
  * This class provides a utility to wait for a set of named conditions to occur.
  *
- * It will execute the trigger runnable in a detached thread once all conditions have been marked
- * true.
+ * It will execute the trigger runnable in a separate thread (which will be joined at instance
+ * destructor time) once all conditions have been marked true.
  */
 class MultiConditionTrigger {
 public:
@@ -37,19 +38,24 @@ public:
 
     MultiConditionTrigger(const MultiConditionTrigger&) = delete;
     MultiConditionTrigger& operator=(const MultiConditionTrigger&) = delete;
+    ~MultiConditionTrigger();
 
     // Mark a specific condition as true. If this condition has called markComplete already or if
     // the event was not specified in the constructor, the function is a no-op.
     void markComplete(const std::string& eventName);
 
 private:
+    void startExecutorThread();
+
     mutable std::mutex mMutex;
     std::set<std::string> mRemainingConditionNames;
     std::function<void()> mTrigger;
     bool mCompleted;
+    std::unique_ptr<std::thread> mExecutorThread;
 
     FRIEND_TEST(MultiConditionTriggerTest, TestCountDownCalledBySameEventName);
 };
+
 }  // namespace statsd
 }  // namespace os
 }  // namespace android

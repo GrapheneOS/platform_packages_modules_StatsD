@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include "tests/statsd_test_util.h"
+
 #ifdef __ANDROID__
 
 using namespace std;
@@ -163,6 +165,125 @@ TEST(MultiConditionTrigger, TestTriggerOnlyCalledOnce) {
         cv.wait_for(unique_lk, chrono::milliseconds(5), [&triggerCalled] { return triggerCalled; });
         EXPECT_FALSE(triggerCalled);
         EXPECT_EQ(triggerCount, 1);
+    }
+}
+
+namespace {
+
+class TriggerDependency {
+public:
+    TriggerDependency(mutex& lock, condition_variable& cv, bool& triggerCalled, int& triggerCount)
+        : mLock(lock), mCv(cv), mTriggerCalled(triggerCalled), mTriggerCount(triggerCount) {
+    }
+
+    void someMethod() {
+        lock_guard lg(mLock);
+        mTriggerCount++;
+        mTriggerCalled = true;
+        mCv.notify_all();
+    }
+
+private:
+    mutex& mLock;
+    condition_variable& mCv;
+    bool& mTriggerCalled;
+    int& mTriggerCount;
+};
+
+}  // namespace
+
+TEST(MultiConditionTrigger, TestTriggerHasSleep) {
+    const string t1 = "t1";
+    set<string> conditionNames = {t1};
+
+    mutex lock;
+    condition_variable cv;
+    bool triggerCalled = false;
+    int triggerCount = 0;
+
+    {
+        TriggerDependency dependency(lock, cv, triggerCalled, triggerCount);
+        MultiConditionTrigger trigger(conditionNames, [&dependency] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            dependency.someMethod();
+        });
+        trigger.markComplete(t1);
+
+        // Here dependency instance will go out of scope and the thread within MultiConditionTrigger
+        // after delay will try to call method of already destroyed class instance
+        // with leading crash if trigger execution thread is detached in MultiConditionTrigger
+        // Instead since the MultiConditionTrigger destructor happens before TriggerDependency
+        // destructor, MultiConditionTrigger destructor is waiting on execution thread termination
+        // with thread::join
+    }
+    // At this moment the executor thread guaranteed terminated by MultiConditionTrigger destructor
+
+    // Ensure that the trigger fired.
+    {
+        unique_lock<mutex> unique_lk(lock);
+        cv.wait(unique_lk, [&triggerCalled] { return triggerCalled; });
+        EXPECT_TRUE(triggerCalled);
+        EXPECT_EQ(triggerCount, 1);
+    }
+}
+
+TEST(MultiConditionTrigger, TestTriggerHasSleepEarlyTermination) {
+    const string t1 = "t1";
+    set<string> conditionNames = {t1};
+
+    mutex lock;
+    condition_variable cv;
+    bool triggerCalled = false;
+    int triggerCount = 0;
+
+    std::condition_variable triggerTerminationFlag;
+    std::mutex triggerTerminationFlagMutex;
+    bool terminationRequested = false;
+
+    // used for error threshold tolerance due to wait_for() is involved
+    const int64_t errorThresholdMs = 25;
+    const int64_t triggerEarlyTerminationDelayMs = 100;
+    const int64_t triggerStartNs = getElapsedRealtimeNs();
+    {
+        TriggerDependency dependency(lock, cv, triggerCalled, triggerCount);
+        MultiConditionTrigger trigger(
+                conditionNames, [&dependency, &triggerTerminationFlag, &triggerTerminationFlagMutex,
+                                 &lock, &triggerCalled, &cv, &terminationRequested] {
+                    std::unique_lock<std::mutex> lk(triggerTerminationFlagMutex);
+                    if (triggerTerminationFlag.wait_for(
+                                lk, std::chrono::seconds(1),
+                                [&terminationRequested] { return terminationRequested; })) {
+                        // triggerTerminationFlag was notified - early termination is requested
+                        lock_guard lg(lock);
+                        triggerCalled = true;
+                        cv.notify_all();
+                        return;
+                    }
+                    dependency.someMethod();
+                });
+        trigger.markComplete(t1);
+
+        // notify to terminate trigger executor thread after triggerEarlyTerminationDelayMs
+        std::this_thread::sleep_for(std::chrono::milliseconds(triggerEarlyTerminationDelayMs));
+        {
+            std::unique_lock<std::mutex> lk(triggerTerminationFlagMutex);
+            terminationRequested = true;
+        }
+        triggerTerminationFlag.notify_all();
+    }
+    // At this moment the executor thread guaranteed terminated by MultiConditionTrigger destructor
+
+    // check that test duration is closer to 100ms rather to 1s
+    const int64_t triggerEndNs = getElapsedRealtimeNs();
+    EXPECT_LE(NanoToMillis(triggerEndNs - triggerStartNs),
+              triggerEarlyTerminationDelayMs + errorThresholdMs);
+
+    // Ensure that the trigger fired but not the dependency.someMethod().
+    {
+        unique_lock<mutex> unique_lk(lock);
+        cv.wait(unique_lk, [&triggerCalled] { return triggerCalled; });
+        EXPECT_TRUE(triggerCalled);
+        EXPECT_EQ(triggerCount, 0);
     }
 }
 
