@@ -536,6 +536,50 @@ TEST(StatsEventTest, TestPushOverflowError) {
     AStatsEvent_release(event);
 }
 
+TEST(StatsEventTest, TestHeapBufferOverflowError) {
+    const std::string testString(4039, 'A');
+    const std::string testString2(47135, 'B');
+
+    AStatsEvent* event = AStatsEvent_obtain();
+    AStatsEvent_setAtomId(event, 100);
+
+    AStatsEvent_writeString(event, testString.c_str());
+    size_t bufferSize = 0;
+    AStatsEvent_getBuffer(event, &bufferSize);
+    EXPECT_EQ(bufferSize, 4060);
+    uint32_t errors = AStatsEvent_getErrors(event);
+    EXPECT_EQ(errors, 0);
+
+    // expand the buffer and fill with data up to the very last byte
+    AStatsEvent_writeString(event, testString2.c_str());
+    bufferSize = 0;
+    AStatsEvent_getBuffer(event, &bufferSize);
+    EXPECT_EQ(bufferSize, 50 * 1024);
+
+    errors = AStatsEvent_getErrors(event);
+    EXPECT_EQ(errors, 0);
+
+    // this write is no-op due to buffer reached its max capacity
+    // should set the overflow flag
+    AStatsEvent_writeString(event, testString2.c_str());
+    bufferSize = 0;
+    AStatsEvent_getBuffer(event, &bufferSize);
+    EXPECT_EQ(bufferSize, 50 * 1024);
+
+    errors = AStatsEvent_getErrors(event);
+    EXPECT_EQ(errors & ERROR_OVERFLOW, ERROR_OVERFLOW);
+
+    // here should be crash
+    AStatsEvent_addBoolAnnotation(event, 1, false);
+
+    AStatsEvent_write(event);
+
+    errors = AStatsEvent_getErrors(event);
+    EXPECT_EQ(errors & ERROR_OVERFLOW, ERROR_OVERFLOW);
+
+    AStatsEvent_release(event);
+}
+
 TEST(StatsEventTest, TestPullOverflowError) {
     const uint32_t atomId = 10100;
     const vector<uint8_t> bytes(430 /* number of elements */, 1 /* value of each element */);
