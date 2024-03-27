@@ -330,6 +330,9 @@ void AStatsEvent_writeStringArray(AStatsEvent* event, const char* const* element
 
 // Side-effect: modifies event->errors if field has too many annotations
 static void increment_annotation_count(AStatsEvent* event) {
+    if (event->lastFieldPos >= event->bufSize) {
+        return;
+    }
     uint8_t fieldType = event->buf[event->lastFieldPos] & 0x0F;
     uint32_t oldAnnotationCount = (event->buf[event->lastFieldPos] & 0xF0) >> 4;
     uint32_t newAnnotationCount = oldAnnotationCount + 1;
